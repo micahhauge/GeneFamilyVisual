@@ -7,6 +7,7 @@
 #        Make start and stop reading frames {^, <, >} be globals
 #        Do we need both start and stop frames?
 #        Determine if were running from the terminal or a web form
+#        Remove startFrame from Gene class? (just check if this is the first exon to set the startFrame at 0/3?)
 
 import os, string, sys, cgi
 import binascii
@@ -20,7 +21,11 @@ import pprint  # for debugging only
 UTR_EXON = -2
 MIN_AA_LEN = 100   # minimum amino acid length to consider
 
-UPLOADED_FILES_DIR = 'uploadedFiles/'
+UPLOADED_FILES_DIR = 'uploadedFiles'
+
+SPLICE_SITE_0 = '^ (0/3, &#x25CF;)'  # 0/3 or in-frame splice site (solid circle)
+SPLICE_SITE_1 = '< (1/2, &#x25B3;)'  # 1/2 (triangle)
+SPLICE_SITE_2 = '> (2/1, &#x25CB;)'  # 2/1 (un-filled/open circle)
 
 # For DEBUGGING in cgi
 import cgitb;
@@ -31,8 +36,7 @@ import cgitb;
 CLUSTAL_INPUT_BASE_FILENAME = "clustalInput.fa"
 
 def debug(msg):
-    if __debug__:
-        print(f"<br/>\nDEBUG: {msg}<br/>\n")
+    if __debug__: print(f"<br/>\nDEBUG: {msg}<br/>\n")
 
 #creating an object to hold all the information for each gene
 class Gene(object):
@@ -44,27 +48,34 @@ class Gene(object):
         # # array that will hold exon lengths 
         # self.ExonLens = []
 
-        # length of AA (unaligned)
-        self.AA_len = 0
+        # # length of AA (unaligned)
+        # self.AA_len = 0
 
         # string to store the translated (unaligned) gene
         self.AA = ''
 
         #string to store the CDS region and lengths
         self.CDS = ''
-        self.CDS_len = []
+        self.CDS_lens = []
 
-        # string to store the translated (aligned) gene
-        self.Aligned_str = ''
+        # string to store the (aligned) amino acids
+        self.AA_aligned = ''
 
-        #string to store the frame string
-        self.Frame_str = ''
+        # # string to store the frame string
+        # self.Frame_str = ''
 
-        #array to keep track of exon frames
+        # List of alignment indicies of the first nucleotide for each exon
         self.Frames = []
 
-        #line color for this gene
-        self.color = ''
+        # #line color for this gene
+        # self.color = ''
+
+    def __str__( self ):
+        newline = '\n'
+        if 'GATEWAY_INTERFACE' in os.environ:  # Called from a CGI form
+            newline = '<br/>\n'
+        return f"Gene (name): {self.name}{newline}\tAA: {self.AA}{newline}\tCDS: {self.CDS}{newline}\tCDS_lens: {self.CDS_lens}{newline}\tAA_aligned: {self.AA_aligned}{newline}\tFrames: {self.Frames}{newline}"
+
         
 # dictionary of codon to amino acid
 dnaToProtD = {
@@ -102,10 +113,10 @@ def alert(msg):
 # Note: Assumes that all chracters are nucleotides (AGCT) and not gaps
 
 def dna_to_prot(strand):
-    if __debug__: print(f"dna_to_prot( (len: {len(strand)}) {strand})")
+    # if __debug__: print(f"dna_to_prot( (len: {len(strand)}) {strand})")
     if len( strand ) % 3 != 0:
         extraNucleotides = len( strand ) % 3
-        print(f'ALERT: The length of the DNA string is NOT a multiple of 3, so the last {extraNucelotides} nucleotides ({strand[ -extraNucleotides:]}) will be ignored (DNA: {strand})')
+        print(f'ALERT: The length of the DNA string is NOT a multiple of 3, so the last {extraNucleotides} nucleotides ({strand[ -extraNucleotides:]}) will be ignored (DNA: {strand})')
         strand = strand[ :-extraNucleotides]
         
     aminos = [ dnaToProtD[ strand[i:i+3] ] for i in range(0, len(strand), 3) ]
@@ -123,7 +134,7 @@ def mkDir():
     baseDir = UPLOADED_FILES_DIR
     if not os.path.exists(baseDir):
         os.makedirs(baseDir)
-        os.chmod(path, 0o755)
+        os.chmod(baseDir, 0o755)
         if __debug__: os.chmod(baseDir, 0o777) # DEBUGGING
         
     newDir = binascii.hexlify(os.urandom(16)).decode()
@@ -152,14 +163,27 @@ def writeJson(dictJson, jsonFilename):
 
 def exonLocs2JSON( gene_dic ):
     debug(f"exonLocs2JSON( {gene_dic} )")
-    if __debug__: pprint.pprint( gene_dic )
-    
+    '''
+    JSON format:
+        exon_list <[<dict (with the following keys)>]> - a list of (potentially shared) exons (cirles/ovals in the visual layout):
+            column <int> - the visual column
+            text <str> - the label to put in the circle/oval
+            length <int> - the number of columns to span (usually 1)
+            fullyUTR <0|1> - 0: not a UTR exon; 1: otherwise
+            [manual_x_adjustment <int>]
+            [manual_y_adjustment <int>]
+        family_list <[<dict (with the following keys)>]> - list of ____________________:
+            exons_in_family <[<int>]> - a list of exon_list indices that the gene has
+            family_name <str> - the name of the gene
+    '''    
+        
     # Make Final 2D array
     CombinedLists = []  # 1st index: genes; 2nd index items are: name, CDSExonCount, startFrame, stopFrame, CDSlength, exonLength, then AA alignment indicies
     geneIndex = 0
     # each gene is a row in CombinedLists
     # append each element in gene.Frame into CombinedLists
     for name, gene in gene_dic.items():
+        debug( gene )
         CombinedLists.append([name])
         for col in gene.Frames:
             CombinedLists[geneIndex].append(col)
@@ -288,21 +312,20 @@ def dataProcess( path, afa ):
     #    gene.name:      the name of file
     # #   gene.ExonLens: using SeqIo.parse to get exon and its length
     #    gene.CDS:       remove the UTR, by strip lowercase letter in exon
-    #    gene.CDS_len:   append of each length of CDS after strip lowercase
+    #    gene.CDS_lens:   append of each length of CDS after strip lowercase
     #    gene.Frames:    append of those follow:
     #        CDSExonCount: count of each ExonCount
-    #        startFrame: if CDSExonCount is zero startFrame is '^'
+    #        startFrame: if CDSExonCount is zero startFrame is SPLICE_SITE_0
     #                    else get the ORF from the previous exon
-    #        stopFram:   if CDSLength % 3 == 0 --> '^'
-    #                    if CDSLength % 3 == 1 --> '<'
-    #                    if CDSLength % 3 == 2 --> '>'
+    #        stopFrame:  if CDSLength % 3 == 0 --> SPLICE_SITE_0
+    #                    if CDSLength % 3 == 1 --> SPLICE_SITE_1
+    #                    if CDSLength % 3 == 2 --> SPLICE_SITE_2
     #        CDSlength:  if CDSExonCount == 0 --> len(CDS)
-    #                    if CDSExonCount not 0 check prev-Frame is '<' --> -2
-    #                    if CDSExonCount not 0 check prev-Frame is '>' --> -1
+    #                    if CDSExonCount not 0 check prev-Frame is SPLICE_SITE_1 --> -2
+    #                    if CDSExonCount not 0 check prev-Frame is SPLICE_SITE_2 --> -1
     #        exonLength: length of exon
     #    gene.CDS:       CDSExon with trim off 1-2 nucleotides if the coding region is not a multiple of 3
     #    gene.AA:        string of converted protein from called dna_to_prot(CDSExon)
-    #    gene.AA_len:    length of AA string
     #  store each gene into gene_dic with its name
     
     # get the files in the directory
@@ -349,25 +372,25 @@ def dataProcess( path, afa ):
                 CDS = exon.strip(string.ascii_lowercase)
                 CDSExon += CDS
                 CDSlength = len(CDS)
-                gene.CDS_len.append(CDSlength)
+                gene.CDS_lens.append(CDSlength)
 
                 if CDSExonCount == 0 :
-                    startFrame = '^'
+                    startFrame = SPLICE_SITE_0
                 else:
                     startFrame = gene.Frames[CDSExonCount-1][2]  # get the ORF from the previous exon
                     # adjust the coding length to account for the reading frame from the previous exon
-                    if startFrame == '<':
+                    if startFrame == SPLICE_SITE_1:
                         CDSlength -= 2
-                    elif(startFrame == '>'):
+                    elif startFrame == SPLICE_SITE_2:
                         CDSlength -= 1
                         
                 # determine the reading frame
-                if(CDSlength % 3 == 0):
-                    stopFrame = '^'
-                elif(CDSlength % 3 == 1):
-                    stopFrame = '<'
+                if CDSlength % 3 == 0:
+                    stopFrame = SPLICE_SITE_0
+                elif CDSlength % 3 == 1:
+                    stopFrame = SPLICE_SITE_1
                 else:
-                    stopFrame = '>'
+                    stopFrame = SPLICE_SITE_2
 
                 debug(f"CDSExonCount: {CDSExonCount}, startFrame: {startFrame}, stopFrame: {stopFrame}, CDSlength: {CDSlength}, exonLength: {exonLength}")
                 gene.Frames.append([CDSExonCount, startFrame, stopFrame, CDSlength, exonLength])
@@ -381,13 +404,12 @@ def dataProcess( path, afa ):
                 
             gene.CDS = CDSExon
             gene.AA = dna_to_prot(CDSExon)
-            gene.AA_len = len(gene.AA)
-            debug(f"len: {gene.AA_len}, AA: {gene.AA}")
+            debug(f"len: {len(gene.AA)}, AA: {gene.AA}")
 
             # Check to make sure all sequences are at least 100 amino acids long
             # Skip genes that are too short
-            if gene.AA_len < MIN_AA_LEN:
-                alert("Gene", name, " is too short with just", gene.AA_len, "amino acids (the minimum is" + str(MIN_AA_LEN) + ")!")
+            if len(gene.AA) < MIN_AA_LEN:
+                alert("Gene", name, " is too short with just", len(gene.AA), "amino acids (the minimum is" + str(MIN_AA_LEN) + ")!")
                 continue
             
             if not afa:
@@ -409,7 +431,7 @@ def dataProcess( path, afa ):
 
     # if there is --afa on the command line, use the MSA from user
     # else use the alignment from the path in file folder
-    # Either option: store Aligned_str into each gene in the gene_dictionary
+    # Either option: store AA_aligned into each gene in the gene_dictionary
     out_file = ""
     if not afa:
         out_file= path + "/aligned.fasta"
@@ -430,37 +452,53 @@ def dataProcess( path, afa ):
                     print(f'ERROR: Found {name} in {out_file} but that name was not in the input FASTA files!')
                     pprint.pprint(gene_dic)
                     sys.exit(1)
-                gene_dic[name].Aligned_str += line
-                
-    # trim off 1-2 nucleotides if the coding region is not a multiple of 3
-    gaplessLen = len( gene_dic[name].Aligned_str.replace("-","") )
-    if gaplessLen % 3 != 0:
-        excessNucleotides = gaplessLen % 3
-        debug(f"Trimming {excessNucleotides} nucleotides from {gene_dic[name].Aligned_str}")
-        gene_dic[name].Aligned_str = gene_dic[name].Aligned_str[:-excessNucleotides]
-
+                gene_dic[name].AA_aligned += line
 
     if afa:
         # verify that the user-supplied alignment file matches exactly with the translated versions of the user-supplied input files
         # for each gene
-        #     compare AA with Aligned_str (except for "-"s) (by making a temporary copy of Aligned_str that has all "-"s replaced with "")
+        #     compare AA with AA_aligned (except for "-"s) (by making a temporary copy of AA_aligned that has all "-"s replaced with "")
         for name in gene_dic:
             if __debug__: print(f"Checking alignment of {name}...<br/>")
             gene = gene_dic[name]
-            gaplessAligned = gene.Aligned_str.replace("-","")
-            print( "Amino acids (len:", str(len(gene.AA)) + "):", gene.AA,"<br/>")
-            print( "DNA (len:", str(len(gaplessAligned)) + "):", gaplessAligned, "(any gaps were removed for this error message)","<br/>")
-            translated = dna_to_prot(gaplessAligned)
+            gaplessAligned = gene.AA_aligned.replace("-","")
+            # print( "Amino acids (len:", str(len(gene.AA)) + "):", gene.AA,"<br/>")
+            # print( "DNA (len:", str(len(gaplessAligned)) + "):", gaplessAligned, "(any gaps were removed for this error message)","<br/>")
             
-            if gene.AA != translated:
+            # check if alignment is DNA (and not AA)
+            isAAAlignment = gaplessAligned
+            for nucleotide in "ACGTacgt":
+                isAAAlignment = isAAAlignment.replace(nucleotide, '')
+            if not isAAAlignment:
+                debug(f"Note: Supplied aligned is a DNA alignment")
+                # trim off 1-2 nucleotides if the coding region is not a multiple of 3
+                gaplessLen = len( gaplessAligned )
+                if gaplessLen % 3 != 0:
+                    excessNucleotides = gaplessLen % 3
+                    debug(f"Trimming {excessNucleotides} nucleotides from {gene_dic[name].AA_aligned}")
+                    # The last characters could be gaps
+                    # gene_dic[name].AA_aligned = gene_dic[name].AA_aligned[:-excessNucleotides]
+                    # Trim the last excessNucleotides nucleotides
+                    for i in range(excessNucleotides):
+                        lastNucleotideIndex = len(gene_dic[name].AA_aligned) - 1
+                        while lastNucleotideIndex >= 0 and gene_dic[name].AA_aligned[ lastNucleotideIndex ] == '-':
+                            lastNucleotideIndex -= 1
+                        if lastNucleotideIndex < 0:
+                            print(f"ERROR: Could not find nucleotide to trim in {gene_dic[name].AA_aligned}!")
+                            sys.exit()
+                            # remove the last nucleotide
+                        gene_dic[name].AA_aligned = gene_dic[name].AA_aligned[:lastNucleotideIndex] + gene_dic[name].AA_aligned[lastNucleotideIndex + 1 : ]
+
+                gaplessAligned = dna_to_prot( gene.AA_aligned.replace("-","") )
+            
+            if gene.AA != gaplessAligned:
                 print( "Translated version of input files for", name, "does not match with the supplied alignment:","<br/>")
-                print( "Amino acids (len:", str(len(gene.AA)) + "):", gene.AA,"<br/>")
-                print( "Alignment (translated) (len:", str(len(translated)) + "):", translated, "<br/>")
-                print( "DNA (len:", str(len(gaplessAligned)) + "):", gaplessAligned, "(any gaps were removed for this error message)","<br/>")
+                print( "Translated amino acids (len:", str(len(gene.AA)) + "):", gene.AA,"<br/>")
+                print( "Alignment (len:", str(len(gaplessAligned)) + "):", gaplessAligned, "(any gaps were removed for this error message)","<br/>")
 
                 firstMismatch = -1
                 for i in range( len(gene.AA) ):
-                    if gene.AA[i] != translated[i]:
+                    if gene.AA[i] != gaplessAligned[i]:
                         firstMismatch = i
                         break
                 print( "First mismatch at index", firstMismatch)    
@@ -468,13 +506,13 @@ def dataProcess( path, afa ):
 
                     
     # for each gene in the gene_dictionary
-    #   intialize frame_len to get integer of each gene.CDS_len divide 3
+    #   intialize frame_len to get integer of each gene.CDS_lens divide 3
         #   while frame_len is zero
         #       go to next exon then append UTR_EXON into gene.Frames
-        #       also break if exon is more than length of gene.CDS_len
-        #       else frame_len is next exon of gene.CDS_len divide 3
+        #       also break if exon is more than length of gene.CDS_lens
+        #       else frame_len is next exon of gene.CDS_lens divide 3
         #
-        #   for each char in gene.Aligned_str
+        #   for each char in gene.AA_aligned
         #       if start is False, then set it to be true then append count into gene.Frame
         #       else if frame_len is zero, go to next exon then append count into gene.Frames and get frame_len from gene.CSD_len divide 3
         #       while frame_len is zero
@@ -487,17 +525,17 @@ def dataProcess( path, afa ):
         #       go to next exon then append UTR_EXON into gene.Frames
         
     for name, gene in gene_dic.items():
-        debug(f"name: {name}, gene: {gene}")
+        debug(f"name: {name}")
         count = 0  # alignment index
         exon = 0   # index of the current        exon for this gene
         firstTime = True
         
-        if len( gene.CDS_len) == 0:
+        if len( gene.CDS_lens) == 0:
             # no valid exons, go to the next gene
             continue
             
-        # frame_len = int(gene.CDS_len[exon]/3)
-        frame_len = gene.CDS_len[exon] // 3
+        # frame_len = int(gene.CDS_lens[exon]/3)
+        frame_len = gene.CDS_lens[exon] // 3
         debug(f"frame_len: {frame_len}")
 
         # process all of the 5' exons that are entirely UTR (i.e., have at most 2 nucleotides)
@@ -505,40 +543,37 @@ def dataProcess( path, afa ):
             gene.Frames[exon].append(UTR_EXON)
             debug(f"5' UTR exon (index {exon})")
             exon += 1
-            if exon < len( gene.CDS_len):
-                frame_len = gene.CDS_len[exon] // 3
+            if exon < len( gene.CDS_lens):
+                frame_len = gene.CDS_lens[exon] // 3
             else:
                 break
 
-        # record the alignment index for
-        # 1) the first AA and
-        # 2) the last AA for each exon
-        debug(f"Aligned_str: {gene.Aligned_str}")
-        for char in gene.Aligned_str:
-            if char is '-':
-                pass
-            else:
+        # Record the alignment index for the first nucleotide of each exon
+        # Record the alignment index for
+        # 1) the first nucleotide and
+        # 2) the last nucleotide for each exon
+        debug(f"AA_aligned: {gene.AA_aligned}")
+        for char in gene.AA_aligned:
+            if char is not '-':
                 if firstTime:
                     firstTime = False
-                    # FUTURE: can this be pulled out of the for loop (i.e., can the frame_len == 0 for the first AA)?
                     gene.Frames[exon].append( count )  # record the index of the alignment
                     debug(f"exon index {exon}'s alignment starts at index {count}")
                 elif frame_len is 0:  # done processing this exon
                     exon += 1
                     gene.Frames[exon].append( count )  # record the index of the alignment
-                    debug(f"exon index {exon}'s alignment ends at index {count}")
-                    frame_len = gene.CDS_len[exon] // 3
+                    frame_len = gene.CDS_lens[exon] // 3
                     while frame_len == 0: # only UTR 
                         debug(f"3' UTR exon (index {exon})")
                         gene.Frames[exon].append(UTR_EXON)
                         exon += 1
-                        frame_len = gene.CDS_len[exon] // 3
+                        frame_len = gene.CDS_lens[exon] // 3
                 else:
                     frame_len -= 1
             count += 1
            
         # process all of the 3' exons that are entirely UTR
-        while exon < len(gene.CDS_len)-1:
+        while exon < len(gene.CDS_lens)-1:
             exon += 1
             gene.Frames[exon].append(UTR_EXON)
             debug(f"3'b UTR exon (index {exon})")

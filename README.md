@@ -9,7 +9,6 @@ Development:
 	+ Refine
 2. Visualization (post-JSON)
 	+ Update/Dynamic Title (Get from the user)
-	+ Remove "Genetic dataset ... algorithm."
 	+ Enlarge ovals on hover over (just like the circles)?
 	+ About link
 	+ Test
