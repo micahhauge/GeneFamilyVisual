@@ -9,7 +9,6 @@ Development:
 	+ Refine
 2. Visualization (post-JSON)
 	+ Update/Dynamic Title (Get from the user)
-	+ Enlarge ovals on hover over (just like the circles)?
 	+ About link
 	+ Test
 3. Create test data sets - Dr. Carroll
