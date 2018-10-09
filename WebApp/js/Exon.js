@@ -95,10 +95,12 @@ class Exon {
         } else {
             this.graphic.on('mouseover', function(){
                 d3.select(this).style("fill", "lightblue");
+                d3.select(this).transition().attr("ry", exonData.radius + p.hoverGrow).attr("rx", exonData.radiusY + p.hoverGrow).duration(300);
             });
             // make graphic shrink on exit
             this.graphic.on('mouseout', function(){
                 d3.select(this).style("fill", exonData.fill);
+                d3.select(this).transition().attr("ry", exonData.radius).attr("rx", exonData.radiusY).duration(300);
             })
         }
 
